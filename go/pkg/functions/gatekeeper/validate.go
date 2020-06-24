@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -137,13 +138,13 @@ func Validate(configs *types.Configs) error {
 		return err
 	}
 	results := resps.Results()
-	if len(results) > 0 {
-		return parseResults(results)
+	if true {
+		return findViolationMismatches(results, configs)
 	}
-	return nil
+	return findViolations(results)
 }
 
-func parseResults(results []*opatypes.Result) error {
+func findViolations(results []*opatypes.Result) error {
 	var msgs []string
 	for _, r := range results {
 		u, ok := r.Resource.(*unstructured.Unstructured)
@@ -167,6 +168,60 @@ func parseResults(results []*opatypes.Result) error {
 		sb.WriteString(fmt.Sprintf("[%d] %s\n\n", i+1, m))
 	}
 	return types.NewConfigError(sb.String())
+}
+
+func findViolationMismatches(results []*opatypes.Result, configs *types.Configs) error {
+	resultMap := make(map[string]bool)
+
+	for _, r := range results {
+		u, ok := r.Resource.(*unstructured.Unstructured)
+		if !ok {
+			return fmt.Errorf("could not cast to unstructured: %+v", r.Resource)
+		}
+
+		path, found := r.Constraint.GetAnnotations()[constants.SourcePathAnnotation]
+		if !found {
+			return fmt.Errorf("could not determine file path for: %+v", r.Constraint)
+		}
+		key := fmt.Sprintf("%s:%s", filepath.Dir(path), u.GetName())
+		resultMap[key] = true
+	}
+
+	var sb strings.Builder
+	for _, u := range *configs {
+		path, found := u.GetAnnotations()[constants.SourcePathAnnotation]
+		if !found {
+			return fmt.Errorf("could not determine file path for: %+v", u)
+		}
+		filename := filepath.Base(path)
+		var shouldFail bool
+		if strings.HasPrefix(filename, "good_") {
+			shouldFail = false
+		} else if strings.HasPrefix(filename, "bad_") {
+			shouldFail = true
+		} else {
+			continue
+		}
+
+		key := fmt.Sprintf("%s:%s", filepath.Dir(path), u.GetName())
+		didFail, ok := resultMap[key]
+		if !shouldFail {
+			if !didFail || !ok {
+				continue
+			}
+			sb.WriteString(fmt.Sprintf("Resource %s (%s) was not meant to fail.\n", u.GetName(), path))
+		} else {
+			if didFail {
+				continue
+			}
+			sb.WriteString(fmt.Sprintf("Resource %s (%s) was meant to fail but instead passed.\n", u.GetName(), path))
+		}
+	}
+
+	if sb.Len() >= 1 {
+		return types.NewConfigError(sb.String())
+	}
+	return nil
 }
 
 var _ types.ConfigFunc = Validate
